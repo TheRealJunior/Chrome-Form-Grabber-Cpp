@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <Windows.h>
 #include <stdio.h>
 #include <tchar.h>
@@ -11,69 +12,87 @@
 #define SIG "\x48\x8B\xC4\x48\x89\x58\x10\x48\x89\x68\x18\x48\x89\x70\x20\x57\x41\x56\x41\x57\x48\x00\x00\x00\x00\x00\x00\x48\x8B\xE9\x4C\x8D\x05\x43\x36\xC2\x01"
 #define MASK "xxxxxxxxxxxxxxxxxxxxx??????xxxxxxxxxx"
 
-void mainThread();
-
-
-BOOLEAN WINAPI DllMain(IN HINSTANCE hDllHandle,
-	IN DWORD     nReason,
-	IN LPVOID    Reserved)
-{
-	BOOLEAN bSuccess = TRUE;
-
-
-	//  Perform global initialization.
-
-	switch (nReason)
-	{
-	case DLL_PROCESS_ATTACH:
-
-		//  For optimization.
-
-		DisableThreadLibraryCalls(hDllHandle);
-		CreateThread(NULL, NULL, (LPTHREAD_START_ROUTINE)mainThread, NULL, NULL, NULL);
-		break;
-
-	case DLL_PROCESS_DETACH:
-
-		break;
-	}
-
-	return bSuccess;
-
-}
-//  end DllMain
-
-LPMODULEINFO FindModule();
+void testFailure();
+MODULEINFO FindModule(HANDLE hProcess);
 uintptr_t findPattern(char* base, unsigned int size, char* pattern, char *mask);
 
-void mainThread() {
-	LPMODULEINFO chromeDllModule = NULL;
+int main() {
+	int temp = -1;
+	char * tempChromeBuf = NULL;
+	MODULEINFO chromeDllModule;
+	ZeroMemory(&chromeDllModule, sizeof(MODULEINFO));
+	int pid;
 	do {
-		chromeDllModule = FindModule();
 		Sleep(DONT_KILL_INTEL);
-	} while (!chromeDllModule);
+		printf("enter pid: ");
+		scanf("%d", &pid);
+		HANDLE chromeProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+		if (chromeProcess == NULL) {
+			int lasterror = GetLastError();
+			printf("unable to open process (%d)\n", lasterror);
+		}
+		else {
+			printf("trying to locate chrome.exe...\n");
+			chromeDllModule = FindModule(chromeProcess);
+			CloseHandle(chromeProcess);
+		}
+	} while (!chromeDllModule.EntryPoint);
 
-	char * ptrToFunc = (char*)findPattern((char*)chromeDllModule->lpBaseOfDll, chromeDllModule->SizeOfImage, SIG, MASK);
-	/*hook ptr and view [rdx+10] to parse content length*/
-	*(ptrToFunc) = 0xff;
-	*(ptrToFunc + 1) = 0xe0;
+	printf("base of dll: %x, size: %x\n", chromeDllModule.lpBaseOfDll, chromeDllModule.SizeOfImage);
+	HANDLE chromeDllProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+	if (!chromeDllProcess) {
+		printf("unable to find process\n");
+		return 1;
+	}
 
+	tempChromeBuf = new char[chromeDllModule.SizeOfImage];
+	SIZE_T bytesRead = 0;
+	ZeroMemory(tempChromeBuf, chromeDllModule.SizeOfImage);
+	if (!ReadProcessMemory(chromeDllProcess, chromeDllModule.lpBaseOfDll, tempChromeBuf, chromeDllModule.SizeOfImage, &bytesRead)) {
+		CloseHandle(chromeDllProcess);
+		delete[] tempChromeBuf;
+		printf("unable to read memory\n");
+		return 1;
+	}
+
+	printf("bytes : %x\n", bytesRead);
+
+	char* relPtrToFunc = (char*)findPattern(tempChromeBuf, chromeDllModule.SizeOfImage, SIG, MASK);
+
+	char *absPtrToSuspectFunc = (char*)((char*)chromeDllModule.lpBaseOfDll + (uintptr_t)relPtrToFunc - (uintptr_t)tempChromeBuf);
+	if (relPtrToFunc == NULL) {
+		printf("unable to locate function");
+	}
+	else {
+		printf("ptrFunc: %llx", absPtrToSuspectFunc);
+	}
+
+	if (tempChromeBuf != NULL) {
+		free(tempChromeBuf);
+		tempChromeBuf = NULL;
+	}
+	if (chromeDllProcess) {
+		CloseHandle(chromeDllProcess);
+		chromeDllProcess = NULL;
+	}
+	printf("press enter to continue\n");
+	scanf("%c", &temp);
+	return 0;
 }
 
 
-LPMODULEINFO FindModule()
+
+MODULEINFO FindModule(HANDLE hProcess)
 {
 	HMODULE hMods[1024];
-	HANDLE hProcess;
 	DWORD cbNeeded;
-	LPMODULEINFO result = NULL;
+	MODULEINFO result;
 	unsigned int i;
 
-	// Get a handle to the process.
-
-	hProcess = GetCurrentProcess();
-	if (NULL == hProcess)
-		return NULL;
+	if (NULL == hProcess) {
+		ZeroMemory(&result, sizeof(MODULEINFO));
+		return result;
+	}
 
 	// Get a list of all the modules in this process.
 
@@ -91,9 +110,9 @@ LPMODULEINFO FindModule()
 				continue;
 			}
 
-			LPMODULEINFO moduleInfo = NULL;
-			if (!GetModuleInformation(hProcess, hMods[i], moduleInfo, sizeof(LPMODULEINFO))) {
-				printf("unable to get module info for module \n");
+			MODULEINFO moduleInfo;
+			if (!GetModuleInformation(hProcess, hMods[i], &moduleInfo, sizeof(MODULEINFO))) {
+				printf("unable to get module info for module (%d)\n", GetLastError());
 				continue;
 			}
 			result = moduleInfo;
@@ -103,7 +122,7 @@ LPMODULEINFO FindModule()
 
 	// Release the handle to the process.
 
-	CloseHandle(hProcess);
+	// CloseHandle(hProcess);
 
 	return result;
 }
